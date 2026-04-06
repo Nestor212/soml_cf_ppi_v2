@@ -1,0 +1,299 @@
+/*******************************************************************************
+Copyright 2021
+Steward Observatory Engineering & Technical Services, University of Arizona
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/>.
+*******************************************************************************/
+
+/**
+@brief SOML Casting Furnace Power Panel Interface firmware
+@author Michael Sibayan
+@date January 27, 2021
+@file pp.hpp
+
+Definition of the control interface to a single power panel
+*/
+
+#ifndef __PP_H__
+#define __PP_H__
+
+
+#include "ppi_global.hpp"
+
+#include <stdint.h>
+#include "TeensyThreads.h"
+
+
+#define PPLIST_MAX_ELEMENTS       240  //!< @brief max number of elements in a list
+#define PP_SERIAL_BAUD           9600  //!< @brief baud rate for comms with power panel
+#define PP_SERIAL_FORMAT       SERIAL_7E1  //!< @brief character format for comms with power panel
+#define PP_TX_NUM_DATA_BYTES       17  //!< @brief number of data bytes, excluding strobe
+#define PP_RX_NUM_DATA_BYTES       17  //!< @brief number of data bytes, excluding strobe
+#define PP_RX_NUM_DATA_SYMBOLS     35  //!< @brief number of RX characters
+
+
+#ifdef SIMULATED_SERIAL_PORTS
+  // Use simulated serial ports
+  class SimulatedSerial;  // Forward declaration
+  #define SERIAL_TYPE SimulatedSerial
+#else
+  // Use the real serial ports
+  #define SERIAL_TYPE HardwareSerial
+#endif
+
+
+/**
+  @brief helper class for maintaining a power panel output data list
+*/
+class PPList{
+public:
+  PPList();
+
+  /**
+    @brief zero out and remove all elements from the list
+  */
+  void zeroList(void);
+
+  /**
+    @brief assign the data for the next element to "data"
+    @param data pointer to memory for writing output data
+    @param data_index pointer to variable returning index of data in list
+    @return true if successful, false if the list is empty or fully read
+  */
+  bool getNextElement(uint32_t* data, int32_t* data_index);
+
+  /**
+    @brief return the number of elements left to run in the list
+    @return the number of cycles left in the list; 0 if none or list is empty
+  */
+  uint32_t elementsLeft(void);
+
+  /**
+    @brief return the full list of elements
+    @param caller_array pointer to array to be filled with the elements (can be NULL)
+    @param caller_size pointer to variable returning number of elements in list (can be NULL)
+  */
+  void getList(uint32_t* caller_array, uint32_t* caller_size);
+
+  /**
+    @brief fill the list with data
+    @param data pointer to memory holding output data
+    @param size length of the list
+    @return true if successful, false if the size is too large
+  */
+  bool setList(uint32_t* data, uint32_t size);
+
+  /**
+    @brief move the contents of the source list into this list
+    @param source pointer to source list
+    @return true if successful, false if the source pointer is invalid
+  */
+  void moveList(PPList* source);
+
+  /**
+    @brief set the index of the list
+    @param new_index new index for list (>= size effectively empties the list)
+  */
+  void setIndex(uint32_t new_index);
+
+  /**
+    @brief extend the list by repeating elements at the end of the list
+    @param add_elements how much to extend the list
+  */
+  void extend(int32_t add_elements);
+
+  /**
+    @brief truncate the list by the specified number of elements from the end
+    @param remove_elements how many elements to remove from the list
+    @return the number of elements still remaining to be removed
+  */
+  int32_t truncate(int32_t remove_elements);
+
+private:
+  uint32_t elements[PPLIST_MAX_ELEMENTS];
+  uint32_t size;
+  uint32_t index;
+  uint32_t repeat;
+};
+
+
+/**
+  @brief Power panel communication status
+*/
+typedef enum pp_status{
+  PP_STATUS_IDLE,             //!< @brief No communication errors, no schedule
+  PP_STATUS_ACTIVE,           //!< @brief No communication errors, running active schedule
+  PP_STATUS_TIMEOUT,          //!< @brief Serial read timed out
+  PP_STATUS_PARITY_ERROR,     //!< @brief Parity error
+  PP_STATUS_INVALID_HEXCHAR,  //!< @brief Invalid hexadecimal character
+  PP_STATUS_CHECKSUM_ERROR,   //!< @brief Checksum mismatch
+  PP_STATUS_MISSING_STROBE,   //!< @brief No terminating strobe character
+  PP_STATUS_UNDERRUN,         //!< @brief Too few characters in response
+  PP_STATUS_OVERRUN,          //!< @brief Too many characters in response
+  PP_NUM_STATUS               //!< @brief Number of status values
+} pp_status_t;
+
+
+typedef struct power_panel_data{
+  uint32_t command_counter; //!< @brief command counter that indicates the data has changed
+  pp_status_t panel_status; //!< @brief panel communications status
+  uint32_t active_schedule[PPLIST_MAX_ELEMENTS]; //!< @brief active heater output schedule
+  uint32_t active_schedule_size; //!< @brief number of elements in active heater output schedule
+  uint64_t active_start_time; //!< @brief ideal NTP time when the active schedule started (ms UTC)
+  uint32_t next_schedule[PPLIST_MAX_ELEMENTS]; //!< @brief next heater output schedule
+  uint32_t next_schedule_size; //!< @brief number of elements in next heater output schedule
+  uint64_t next_start_time; //!< @brief NTP start time for the next heater output schedule (ms UTC)
+  int32_t  command_index; //!< @brief command position in active schedule
+  uint64_t command_sent_ntp_ms; //!< @brief NTP time when command was sent (ms UTC)
+  uint32_t command_sent_micros; //!< @brief micros() time when command was sent (us)
+  uint32_t heater_output; //!< @brief heater outputs
+  uint32_t v_mon; //!< @brief voltage monitor inputs
+  uint32_t il_mon; //!< @brief local current monitor inputs
+  uint32_t ir_mon; //!< @brief remote current monitor inputs
+  uint32_t cycle_period; //!< @brief current cycle period (us)
+  int32_t  cycle_offset; //!< @brief current cycle offset from NTP (us)
+} power_panel_data_t;
+
+
+/**
+@brief direct interface for communicating with a power panel
+*/
+class PowerPanel{
+public:
+  PowerPanel();
+
+  /**
+    @brief set initial values, start the serial port and the tick state machine
+    @param port the serial port to use for comms to the power panel (1 | 2)
+    @return true on success | false on failure
+
+    This function should be executed once during system start before using 'tick()'.
+  */
+  bool start(unsigned int port);
+
+  /**
+    @brief get feedback data from this object
+    @param data_ptr pointer to memory to write current feedback data
+  */
+  void getCurrentData(power_panel_data_t* data_ptr);
+
+  /**
+    @brief Convert a panel status code to a string
+    @param panel_status the panel status code
+    @return human-readable string description of the panel status code
+  */
+  const char * panelStatusToString(pp_status_t panel_status);
+
+  /**
+    @brief set the error lamp outputs
+    @param data 30 lamp states (1-bit per lamp) represented by bits 0 to 29
+           of a 32-bit number
+
+    Can be set at any time.  Outputs will be set during next write cycle.
+  */
+  void setErrorLampData(uint32_t data);
+
+  /**
+    @brief get the error lamp outputs
+    @return 30 lamp states (1-bit per lamp) represented by bits 0 to 29 of a
+            32-bit number
+  */
+  uint32_t getErrorLampData();
+
+  /**
+    @brief accept a new list for processing as the "next" list
+    @param list pointer to a list containing up to PPLIST_MAX_ELEMENTS elements
+    @param size length of the list
+    @param apply_start whether to apply the specified start time
+    @param start_ntp_ms the start time for the list (milliseconds UTC)
+    @return true on success, false if the size is too large
+
+    This function will assign data to the "next" heater output list.
+    Successive calls to this function overwrite the "next" list.
+
+    Uses Threads::Mutex for thread safety
+  */
+  bool writeNextList(uint32_t *list, uint32_t size, bool apply_start, uint64_t start_ntp_ms);
+
+  /**
+    @brief main power panel loop
+
+    This is the main processing function for a Power Panel and it should be
+    executed regularly.  Timing is handled internally.
+  */
+  void tick();
+
+private:
+  void writeStrobe(); //!< @brief write the strobe character to the serial port
+  void calculateCyclePeriod(void); //!< @brief calculate the period of the next cycle
+  void resetCycleTime(int64_t offset_ms); //!< @brief reset the ideal cycle time to NTP
+  void startOffsetSequence(double cycle_offset_ms); //!< @brief start a cycle offset sequence
+  void setTxData(); //!< @brief get next list element and assign tx_data
+  void processPendingList(); //!< @brief fill the next list with data from the pending list
+  void writeSerial(); //!< @brief write command data to the serial port (no strobe)
+  void parseResponse(); //!< @brief Convert text response to status data
+  void setErrorStatus(pp_status_t panel_status); //!< @brief Report an error with the power panel
+  void setStatus(uint32_t v_mon, uint32_t il_mon, uint32_t ir_mon,
+                  pp_status_t panel_status); //!< @brief Report the status of the power panel
+
+  //!< @brief Power panel state machine states
+  typedef enum pp_state_machine{
+    PP_STATEMACHINE_START,
+    PP_STATEMACHINE_STROBE,
+    PP_STATEMACHINE_WAIT,
+  } pp_state_machine_t;
+
+  //!< @brief Data to be delayed by one cycle to align with received reply
+  typedef struct delay_data{
+    uint32_t command_output; //!< @brief command sent to heaters
+    int32_t  command_index; //!< @brief index of command in active list
+    uint64_t active_start_ntp_ms; //!< @brief Ideal NTP time at the start of the active list (ms UTC)
+    uint64_t next_start_ntp_ms; //!< @brief Ideal NTP time at the start of the next list (ms UTC)
+  } delay_data_t;
+
+  SERIAL_TYPE* serial; //!< @brief pointer to serial port to power panel
+
+  PPList old_active_list; //!< @brief previous active heater output list
+  PPList active_list; //!< @brief current active heater output list
+  PPList next_list; //!< @brief next heater output list
+  PPList pending_list; //!< @brief new heater output list received but awaiting processing
+  uint64_t pending_start_ntp_ms; //!< @brief Ideal NTP time at the start of the pending list (ms UTC)
+  bool received_pending_list; //!< @brief A new list has been received but not yet processed
+  bool received_pending_start; //!< @brief The start time for the pending list has been specified
+  bool switched_list; //!< @brief the heater output lists were recently switched
+  bool active_modified; //!< @brief the active list was modified by a start offset
+
+  pp_state_machine_t state_machine; //!< @brief state machine current state
+  power_panel_data_t data; //!< @brief diagnositic and feedback data
+  delay_data_t this_cycle; //!< @brief data being sent to panel in this cycle
+  delay_data_t last_cycle; //!< @brief data sent to panel in last cycle
+  uint32_t lamps; //!< @brief output value of error lamps
+
+  bool correcting_offset; //!< @brief are we currently correcting a cycle offset?
+  uint32_t sequence_length; //!< @brief number of time samples to take in this sequence
+  uint32_t strobe_count; //!< @brief number of strobe time samples taken
+  double sum_cycle_offset_ms; //!< @brief sum of cycle NTP time offset from ideal (ms)
+  int32_t avg_cycle_offset_us; //!< @brief average cycle NTP time offset from ideal (us)
+  uint64_t ideal_cycle_ntp_ms; //!< @brief Ideal NTP time for start of current command cycle (ms UTC)
+  uint64_t cycle_ntp_ms; //!< @brief NTP time at start of current command cycle (ms UTC)
+  uint32_t cycle_time_us; //!< @brief micros() time at start of current command cycle (us)
+  uint32_t cycle_period_us; //!< @brief time to wait between command cycles (us)
+  uint32_t next_cycle_us; //!< @brief micros() time to start the next command cycle (us)
+
+  uint8_t tx_data[PP_TX_NUM_DATA_BYTES]; //!< @brief data as bytes for transmitting
+  uint8_t rx_buffer[PP_RX_NUM_DATA_SYMBOLS]; //!< @brief unparsed response data
+  uint32_t rx_bytes; //!< @brief keep track of bytes received
+  Threads::Mutex list_lock;
+  Threads::Mutex data_lock;
+};
+
+#endif  // __PP_H__
