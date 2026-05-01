@@ -28,7 +28,7 @@ ADG732 + ADC  temperature inputs
 
 | Peripheral | Interface | Purpose |
 |---|---|---|
-| PCA9698  2 (`0x10`, `0x11`) | Wire (i2c0) | Local voltage + local current sense (heaters 029) |
+| PCA9698 x2 (`0x10`, `0x11`) | Wire (i2c0) | Local voltage + local current sense (heaters 029) |
 | PCA9698 (`0x12`) | Wire1 (i2c1) | Relay control outputs (heaters 029) |
 | PCA9698 (`0x13`) | Wire1 (i2c1) | Remote current sense (heaters 029) |
 | ADG732BSUZ | GPIO | 32-channel analog mux for temperature sensors |
@@ -49,7 +49,7 @@ include/
     powerPanel.hpp           PowerPanel class declaration
     LP5899_driver.hpp        LP5899 SPI driver class declaration
     led_mapper.hpp           LedPanelMapper class declaration
-    led_panel_types.hpp      ScanFrame struct (8 lines  15 cols, R + G channels)
+    scanFrame.hpp            ScanFrame struct (8 lines  15 cols, R + G channels)
     og_ppi.hpp               PowerPanelInterface (MQTT / Sparkplug B) class declaration
     og_ppi_metrics.hpp       Sparkplug B metric alias enum + metric name table
     og_ntp_thread.hpp        NTP thread public API
@@ -122,27 +122,27 @@ Derived from TI reference code.
 
 ---
 
-### `led_panel_types.hpp` / `led_mapper.hpp` + `led_mapper.cpp`
+### `scanFrame.hpp` / `led_mapper.hpp` + `led_mapper.cpp`
 Maps heater state to the physical LED panel.
 
 **ScanFrame layout** (8 lines  15 columns, R + G PWM channels):
 
 | Line | R channel | G channel |
 |---|---|---|
-| 0 | fault, heaters 014 | relay, heaters 014 |
-| 1 | fault, heaters 1529 | relay, heaters 1529 |
-| 2 |  | localV, heaters 014 |
-| 3 |  | localV, heaters 1529 |
-| 4 |  | localI, heaters 014 |
-| 5 |  | localI, heaters 1529 |
-| 6 |  | remoteI, heaters 014 |
-| 7 |  | remoteI, heaters 1529 |
+| 0 | fault, heaters 0-14 | relay, heaters 0-14 |
+| 1 | fault, heaters 15-29 | relay, heaters 15-29 |
+| 2 |  | localV, heaters 0-14 |
+| 3 |  | localV, heaters 15-29 |
+| 4 |  | localI, heaters 0-14 |
+| 5 |  | localI, heaters 15-29 |
+| 6 |  | remoteI, heaters 0-14 |
+| 7 |  | remoteI, heaters 15-29 |
 
-Fault (red) = `ioValid == INVALID`, or `relayCommand` on with any sensor reading off.
+Fault (red) = `ioValid == INVALID`, or `relayCommand` on with any sensor reading off, or `relayCommand` off with any sensor reading on.
 
 ---
 
-### `og_ppi.hpp` / `og_ppi.cpp`  `PowerPanelInterface`
+### `og_ppi.hpp` / `og_ppi.cpp`
 Sparkplug B MQTT interface. Connects to one of two redundant brokers and publishes all panel metrics.
 
 **Published node metrics (read-only from host):**
@@ -186,7 +186,7 @@ Provides `ntp_get_current_time_millis()` used by the scheduler and MQTT timestam
 
 ## Initialization sequence (`setup()`)
 
-1. Serial at 460800 baud
+1. Serial at 115200 baud
 2. Read hardware ID jumpers (sets IP address last octet, MQTT node ID suffix)
 3. LP5899 SPI driver init
 4. PCA9698 RST/INT pins driven/pulled

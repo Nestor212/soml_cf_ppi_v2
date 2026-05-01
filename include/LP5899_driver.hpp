@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <SPI.h>
-#include "led_panel_types.hpp"
+#include "scanFrame.hpp"
 
 /// LP5890 LED driver controller for 8-line × 15-channel panel.
 /// Manages SPI communication, frame buffering, and hardware synchronization.

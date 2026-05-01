@@ -189,7 +189,7 @@ void tempMuxBegin_()
  */
 void setup()
 {
-  Serial.begin(460800);
+  Serial.begin(115200);
   while (!Serial && millis() < 2000) {}
   delay(2000);
 

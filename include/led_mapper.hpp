@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include "led_panel_types.hpp"
+#include "scanFrame.hpp"
 #include "heaterState.hpp"
 
 /**
