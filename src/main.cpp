@@ -220,18 +220,18 @@ void setup()
   {
     Serial.println(F("LP5899/LP5890 init failed"));
   }
-  Serial.println();
-  Serial.println(F("===== LP5899 BASIC TEST ====="));
-  ledDriver.printPins(Serial);
-  ledDriver.debugReadDeviceId(&Serial);
-  ledDriver.debugReadStatus(&Serial);
-  applyPanelRuntimePreamble_();
+  // Serial.println();
+  // Serial.println(F("===== LP5899 BASIC TEST ====="));
+  // ledDriver.printPins(Serial);
+  // ledDriver.debugReadDeviceId(&Serial);
+  // ledDriver.debugReadStatus(&Serial);
+  // applyPanelRuntimePreamble_();
 
-  Serial.println(F("============================="));
-  Serial.print(F(" vsync_us="));
-  Serial.print(PANEL_VSYNC_PERIOD_US);
-  Serial.print(F(" frame_ms="));
-  Serial.println(PANEL_FRAME_PERIOD_MS);
+  // Serial.println(F("============================="));
+  // Serial.print(F(" vsync_us="));
+  // Serial.print(PANEL_VSYNC_PERIOD_US);
+  // Serial.print(F(" frame_ms="));
+  // Serial.println(PANEL_FRAME_PERIOD_MS);
 
   /**
    * ---- PCA reset + interrupt pins ----
