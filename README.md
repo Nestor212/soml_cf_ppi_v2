@@ -1,4 +1,4 @@
-﻿# pp_controller_v1
+﻿# pp_controller_v2
 # Power Panel Controller Firmware (Teensy 4.1)
 
 ## Overview
