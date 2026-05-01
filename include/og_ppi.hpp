@@ -32,10 +32,10 @@ interfaces.
 #include <NativeEthernet.h> // Teensy requires NativeEthernet to use onboard NIC
 #include <PubSubClient.h> // pub&sub MQTT messages
 #include "so_sparkplugb.h"
+#include "og_ppi_metrics.hpp"
+#include "og_ntp_thread.hpp"
 #include "ppi_global.hpp"
-#include "ppi_metrics.hpp"
-#include "ntp_thread.hpp"
-#include "pp.hpp"
+#include "powerPanel.hpp"
 
 #if defined(SIMULATED_POWER_PANEL)
 #include "pp_sim.hpp"
@@ -77,13 +77,6 @@ using namespace PPI;
   #define PPI0_IP             192, 168, 1, 150
 #endif
 
-// Pin assignments
-#define JUMPER_PIN_1 28
-#define JUMPER_PIN_2 29
-#define JUMPER_PIN_3 30
-#define JUMPER_PIN_4 31
-#define JUMPER_PIN_5 32
-
 // Jumper pins have inverted sense, so reverse the value read
 #define PPI_JP1 (!digitalRead(JUMPER_PIN_1))
 #define PPI_JP2 (!digitalRead(JUMPER_PIN_2))
@@ -102,13 +95,41 @@ using namespace PPI;
 #define NUM_NODE_METRICS  (EndNodeMetricAlias-1) // number of Node metrics, not including bdseq
 #define BIN_BUF_SIZE 10000 // size of buffer used to construct outgoing messages (bytes)
 
+static constexpr uint32_t PPLIST_MAX_ELEMENTS = 240;
+
+typedef enum ppi_panel_status{
+  PPI_PANEL_STATUS_IDLE,
+  PPI_PANEL_STATUS_ACTIVE,
+  PPI_PANEL_STATUS_IO_INVALID,
+} ppi_panel_status_t;
+
+typedef struct ppi_panel_data{
+  uint32_t command_counter;
+  ppi_panel_status_t panel_status;
+  uint32_t active_schedule[PPLIST_MAX_ELEMENTS];
+  uint32_t active_schedule_size;
+  uint64_t active_start_time;
+  uint32_t next_schedule[PPLIST_MAX_ELEMENTS];
+  uint32_t next_schedule_size;
+  uint64_t next_start_time;
+  int32_t  command_index;
+  uint64_t command_sent_ntp_ms;
+  uint32_t command_sent_micros;
+  uint32_t heater_output;
+  uint32_t v_mon;
+  uint32_t il_mon;
+  uint32_t ir_mon;
+  uint32_t cycle_period;
+  int32_t  cycle_offset;
+} ppi_data_t;
+
 
 /**
 @brief helper struct for all power panel related data
 */
 typedef struct power_panel_device_data{
-  power_panel_data_t current_data;
-  power_panel_data_t last_data;
+  ppi_data_t current_data;
+  ppi_data_t last_data;
   uint32_t error_lamps;
   uint32_t v_down;
   uint32_t il_down;
@@ -121,6 +142,7 @@ public:
   PowerPanelInterface(); //!< @brief constructor
   ~PowerPanelInterface(); //!< @brief destructor
 
+  void attach_panel(PowerPanel *panelBackend); //!< @brief Attach the current hardware backend
   bool start_panel(int main_port); //!< @brief Start up the panel thread/s
   bool network_init(Threads::Mutex *net_lock); //!< @brief Initialize the network
   bool check_broker(void); //!< @brief Check connection to broker
@@ -148,10 +170,14 @@ private:
   void publish_node_data(void);
   bool process_host_state_message(char* topic, byte* payload, unsigned int len);
   bool process_node_cmd_message(char* topic, byte* payload, unsigned int len);
+  bool apply_next_schedule_(const uint32_t* elements, uint32_t num_elements,
+                            bool scheduleStartSet, uint64_t scheduleStart);
+  void snapshot_panel_state_(void);
+  static const char* panelStatusToString_(ppi_panel_status_t status);
   uint32_t heaters_only(uint32_t heater_word);
   void reset_teensy(void);
 
-  PowerPanel panel; //!< @brief the Power Panel
+  PowerPanel *panel; //!< @brief attached PowerPanel backend
   power_panel_device_data_t dev; //!< @brief all data related to the power panel
 
 #if defined(SIMULATED_POWER_PANEL)

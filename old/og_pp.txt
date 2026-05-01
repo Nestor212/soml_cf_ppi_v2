@@ -27,8 +27,8 @@ Implementation of the control interface to a single power panel
 #include "TeensyThreads.h"
 #include <cstring>
 #include <math.h>
-#include "pp.hpp"
-#include "ntp_thread.hpp"
+#include "og_pp.hpp"
+#include "og_ntp_thread.hpp"
 
 
 #ifdef SIMULATED_SERIAL_PORTS

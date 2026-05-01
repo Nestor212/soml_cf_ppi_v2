@@ -28,7 +28,7 @@ controller.
 #include <cstring>
 #include <string.h>
 #include <ArduinoJson.h> // STATE messages are JSON encoded
-#include "ppi.hpp"
+#include "og_ppi.hpp"
 
 // Sparkplug settings
 #define GROUP_ID          PPI_GROUP_ID      // This node's group ID, used by NODE_TOPIC()
@@ -38,6 +38,63 @@ controller.
 #define NUM_MAC_OCTETS    6                 // Number of octets in a MAC address
 
 StaticJsonDocument<MAX_HOST_STATE_MSG_LEN> json;
+
+namespace {
+
+constexpr uint32_t HEATER_MASK_30 = 0x3FFFFFFFu;
+
+uint32_t relayMaskFromState_(const PowerPanelState& state) {
+  uint32_t mask = 0;
+  for (uint8_t index = 0; index < HEATER_COUNT; ++index) {
+    if (state.heaters[index].relayCommand) {
+      mask |= (1UL << index);
+    }
+  }
+  return mask;
+}
+
+uint32_t voltageMaskFromState_(const PowerPanelState& state) {
+  uint32_t mask = 0;
+  for (uint8_t index = 0; index < HEATER_COUNT; ++index) {
+    if (state.heaters[index].localVoltage) {
+      mask |= (1UL << index);
+    }
+  }
+  return mask;
+}
+
+uint32_t localCurrentMaskFromState_(const PowerPanelState& state) {
+  uint32_t mask = 0;
+  for (uint8_t index = 0; index < HEATER_COUNT; ++index) {
+    if (state.heaters[index].localCurrent) {
+      mask |= (1UL << index);
+    }
+  }
+  return mask;
+}
+
+uint32_t remoteCurrentMaskFromState_(const PowerPanelState& state) {
+  uint32_t mask = 0;
+  for (uint8_t index = 0; index < HEATER_COUNT; ++index) {
+    if (state.heaters[index].remoteCurrent) {
+      mask |= (1UL << index);
+    }
+  }
+  return mask;
+}
+
+ppi_panel_status_t panelStatusFromState_(const PowerPanelState& state, uint32_t heaterOutput) {
+  if (state.localIoValid == SignalValidity::INVALID ||
+      state.remoteIoValid == SignalValidity::INVALID) {
+    return PPI_PANEL_STATUS_IO_INVALID;
+  }
+  if (heaterOutput != 0) {
+    return PPI_PANEL_STATUS_ACTIVE;
+  }
+  return PPI_PANEL_STATUS_IDLE;
+}
+
+}
 
 // Teensy MAC address
 #if defined(LINUX_SIMULATOR)
@@ -65,6 +122,7 @@ void callback(char* topic, byte* payload, unsigned int l){
 // Constructor
 PowerPanelInterface::PowerPanelInterface(){
   callback_object = this;
+  this->panel = NULL;
   memset(&this->dev, 0, sizeof(this->dev));
 
   // By default no sensors are down
@@ -121,6 +179,10 @@ PowerPanelInterface::PowerPanelInterface(){
   this->primary_host_timeout       = 0;
 }
 
+void PowerPanelInterface::attach_panel(PowerPanel *panelBackend){
+  this->panel = panelBackend;
+}
+
 // Destructor
 PowerPanelInterface::~PowerPanelInterface(){
   // Free up any memory allocated for the schedule datasets
@@ -132,20 +194,92 @@ PowerPanelInterface::~PowerPanelInterface(){
 bool PowerPanelInterface::start_panel(int main_port){
   this->commsChannel = main_port;
 
+  if(this->panel == NULL){
+    DebugPrint("No PowerPanel backend attached");
+    return false;
+  }
+
 #if defined(SIMULATED_POWER_PANEL)
   // Start up the power panel simulator thread on the other serial port first
   if(!this->ppsim.start(3 - main_port))
     DebugPrint("Failed to start Simulated Power Panel");
 #endif
 
-  // Start up the power panel thread on the main serial port
-  if(!this->panel.start(main_port)){
-    DebugPrintNoEOL("Failed to start Power Panel thread on port ");
-    DebugPrint(main_port);
+  return true;
+}
+
+const char *PowerPanelInterface::panelStatusToString_(ppi_panel_status_t status){
+  switch(status){
+    case PPI_PANEL_STATUS_IDLE:
+      return "Idle";
+    case PPI_PANEL_STATUS_ACTIVE:
+      return "Active";
+    case PPI_PANEL_STATUS_IO_INVALID:
+      return "I/O Invalid";
+    default:
+      return "Unknown";
+  }
+}
+
+void PowerPanelInterface::snapshot_panel_state_(void){
+  if(this->panel == NULL){
+    return;
+  }
+
+  const PowerPanelState& state = this->panel->state();
+  PowerPanelScheduleSnapshot sched;
+  this->panel->getScheduleSnapshot(sched);
+  ppi_data_t& snapshot = this->dev.current_data;
+
+  const uint32_t heaterOutput = relayMaskFromState_(state) & HEATER_MASK_30;
+  const uint32_t voltageMask = voltageMaskFromState_(state) & HEATER_MASK_30;
+  const uint32_t localCurrentMask = localCurrentMaskFromState_(state) & HEATER_MASK_30;
+  const uint32_t remoteCurrentMask = remoteCurrentMaskFromState_(state) & HEATER_MASK_30;
+
+  snapshot.heater_output = heaterOutput;
+  snapshot.v_mon = voltageMask;
+  snapshot.il_mon = localCurrentMask;
+  snapshot.ir_mon = remoteCurrentMask;
+  snapshot.panel_status = panelStatusFromState_(state, heaterOutput);
+  snapshot.command_counter = sched.commandCounter;
+  snapshot.command_index = sched.commandIndex;
+  snapshot.command_sent_ntp_ms = sched.commandSentNtpMs;
+  snapshot.command_sent_micros = sched.commandSentMicros;
+  snapshot.active_start_time = sched.activeStartNtpMs;
+  snapshot.next_start_time = sched.nextStartNtpMs;
+  snapshot.cycle_period = sched.cyclePeriodUs;
+  snapshot.cycle_offset = sched.cycleOffsetUs;
+
+  snapshot.active_schedule_size = sched.activeScheduleSize;
+  for(uint16_t idx = 0; idx < sched.activeScheduleSize; ++idx){
+    snapshot.active_schedule[idx] = sched.activeSchedule[idx];
+  }
+  snapshot.next_schedule_size = sched.nextScheduleSize;
+  for(uint16_t idx = 0; idx < sched.nextScheduleSize; ++idx){
+    snapshot.next_schedule[idx] = sched.nextSchedule[idx];
+  }
+}
+
+bool PowerPanelInterface::apply_next_schedule_(const uint32_t* elements,
+                                               uint32_t num_elements,
+                                               bool scheduleStartSet,
+                                               uint64_t scheduleStart){
+  if(num_elements > PPLIST_MAX_ELEMENTS){
     return false;
   }
 
-  return true;
+  uint32_t masked[PPLIST_MAX_ELEMENTS] = {0};
+  for(uint32_t index = 0; index < num_elements; ++index){
+    masked[index] = heaters_only(elements[index]);
+  }
+
+  if(this->panel == NULL){
+    return false;
+  }
+  return this->panel->writeNextList(masked,
+                                    static_cast<uint16_t>(num_elements),
+                                    scheduleStartSet,
+                                    scheduleStart);
 }
 
 /** Perform network start-up configuration
@@ -1005,8 +1139,8 @@ bool PowerPanelInterface::process_node_cmd_message(char* topic, byte* payload, u
     // the same message as a new schedule.
     // Note that we don't publish the new metrics until they've been accepted
     // by the panel.
-    this->panel.writeNextList(elements, num_elements, scheduleStartSet,
-                              scheduleStart);
+    (void)this->apply_next_schedule_(elements, num_elements, scheduleStartSet,
+                                     scheduleStart);
 
   // Free the decoder memory
   sp_free_payload(&rx_payload);
@@ -1089,40 +1223,51 @@ bool PowerPanelInterface::update_status(bool force){
   // Update our copy of the NTP data
   memcpy(&this->ntpStatus, &newNtpStatus, sizeof(this->ntpStatus));
 
-  // Check if power panel has updated
-  this->panel.getCurrentData(&this->dev.current_data);
-  if(!force && this->dev.current_data.command_counter == this->dev.last_data.command_counter)
-    // Power panel data hasn't changed since the last update
-    return changed;
+  // Snapshot current panel state from the direct I/O backend.
+  snapshot_panel_state_();
 
   // Compute the error indicator lamp settings
   uint32_t error_lamps = 0;
-  if(this->dev.current_data.panel_status == PP_STATUS_IDLE ||
-     this->dev.current_data.panel_status == PP_STATUS_ACTIVE){ // no error
-    // Turn error lamps on for "heater failed on" (HON) error:
-    //   - The heater output is OFF, AND:
-    //     - EITHER all three sensors are ON
-    //     - OR two sensors are ON AND the other sensor is DOWN
-    uint32_t ho = this->dev.current_data.heater_output;
-    uint32_t v  = this->dev.current_data.v_mon  & ~this->dev.v_down;
-    uint32_t il = this->dev.current_data.il_mon & ~this->dev.il_down;
-    uint32_t ir = this->dev.current_data.ir_mon & ~this->dev.ir_down;
+  Serial.println("Panel status: " + String(this->dev.current_data.panel_status));
+  if(this->dev.current_data.panel_status == PPI_PANEL_STATUS_IDLE ||
+     this->dev.current_data.panel_status == PPI_PANEL_STATUS_ACTIVE)
+  { // no error
+    uint32_t ho = this->dev.current_data.heater_output & HEATER_MASK_30;
+    // Serial.println("ho: " + String(ho, BIN));
+    uint32_t v  = this->dev.current_data.v_mon & HEATER_MASK_30;
+    // Serial.println("v: " + String(v, BIN));
+    uint32_t il = this->dev.current_data.il_mon & HEATER_MASK_30;
+    // Serial.println("il: " + String(il, BIN));
+    uint32_t ir = this->dev.current_data.ir_mon & HEATER_MASK_30;
+    // Serial.println("ir: " + String(ir, BIN));
 
-    uint32_t il_on_or_down = il | this->dev.il_down;
-    uint32_t ir_on_or_down = ir | this->dev.ir_down;
-    uint32_t il_and_ir_down = this->dev.il_down & this->dev.ir_down;
-    uint32_t v_on_and_i_on = v & il_on_or_down & ir_on_or_down & ~il_and_ir_down;
-    uint32_t v_down_and_i_on = this->dev.v_down & il & ir;
+    // Healthy sensors are those not flagged as known-down by host overrides.
+    const uint32_t v_good  = (~this->dev.v_down)  & HEATER_MASK_30;
+    const uint32_t il_good = (~this->dev.il_down) & HEATER_MASK_30;
+    const uint32_t ir_good = (~this->dev.ir_down) & HEATER_MASK_30;
 
-    error_lamps = ~ho & (v_on_and_i_on | v_down_and_i_on);
+    // For each heater bit:
+    // - any_sensor_on  catches HO=0 mismatches (failed-on indication)
+    // - any_sensor_off catches HO=1 mismatches (failed-off indication)
+    const uint32_t any_sensor_on = (v & v_good) | (il & il_good) | (ir & ir_good);
+    const uint32_t any_sensor_off = ((~v) & v_good) | ((~il) & il_good) | ((~ir) & ir_good);
+
+    const uint32_t ho_off_mismatch = ((~ho) & HEATER_MASK_30) & any_sensor_on;
+    const uint32_t ho_on_mismatch = ho & any_sensor_off;
+
+    // Serial.println("any_sensor_on: " + String(any_sensor_on, BIN));
+    // Serial.println("any_sensor_off: " + String(any_sensor_off, BIN));
+    // Serial.println("ho_off_mismatch: " + String(ho_off_mismatch, BIN));
+    // Serial.println("ho_on_mismatch: " + String(ho_on_mismatch, BIN));
+
+    error_lamps = (ho_off_mismatch | ho_on_mismatch) & HEATER_MASK_30;
   }
-  else{
+  else
+  {
     // Communications error - turn all error lamps on
     error_lamps = 0xFFFFFFFF;
   }
-
-  // Update the power panel's indicator light commanded value
-  this->panel.setErrorLampData(error_lamps);
+  Serial.println("Error lamps: " + String(error_lamps, BIN));
 
   // Update the error lamps metric if it changed
   if(force || this->dev.error_lamps != error_lamps){
@@ -1136,7 +1281,7 @@ bool PowerPanelInterface::update_status(bool force){
   // Update the power panel status metric if it changed
   if(force || this->dev.current_data.panel_status != this->dev.last_data.panel_status){
     // Convert power panel status to a string
-    this->panelStatus = this->panel.panelStatusToString(this->dev.current_data.panel_status);
+    this->panelStatus = panelStatusToString_(this->dev.current_data.panel_status);
     if(update_metric(&node_metrics, &this->panelStatus, update_time) == SO_SP_ERR_NONE)
       publish_requested = true;
     else
@@ -1186,15 +1331,20 @@ bool PowerPanelInterface::update_status(bool force){
       DebugPrint("Failed to update Next Schedule metric");
   }
 
+  const bool dataChanged = changed ||
+                           (memcmp(&this->dev.current_data,
+                                   &this->dev.last_data,
+                                   sizeof(this->dev.current_data)) != 0);
+
   // Update last data
-  memcpy(&this->dev.last_data, &this->dev.current_data, sizeof(power_panel_data_t));
+  memcpy(&this->dev.last_data, &this->dev.current_data, sizeof(this->dev.current_data));
 
   // Don't publish data if this was a forced update
   if(force)
     publish_requested = false;
 
   // Data has changed
-  return true;
+  return dataChanged;
 }
 
 // Return true if the Primary Host is online on the broker; return false if the

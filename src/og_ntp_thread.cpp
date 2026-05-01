@@ -9,7 +9,7 @@
  */
 
 
-#include "ntp_thread.hpp"
+#include "og_ntp_thread.hpp"
 
 #include <NativeEthernet.h>
 #include <NTPClient_Generic.h>

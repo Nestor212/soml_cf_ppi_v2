@@ -2,10 +2,11 @@
 #include <Wire.h>
 #include <SPI.h>
 
-#include "pinout.hpp"
+#include "ppi_global.hpp"
 #include "powerPanel.hpp"
 #include "LP5899_driver.hpp"
 #include "led_mapper.hpp"
+#include "og_ppi.hpp"
 
 /**
  * ============================================================
@@ -19,6 +20,13 @@ ScanFrame panelFrame;
 
 // Main system controller
 PowerPanel powerPanel;
+PowerPanelInterface ppi;
+Threads::Mutex networkLock;
+
+static IPAddress ntpServerIp[NUM_BROKERS] = {
+  IPAddress(MQTT_BROKER_1),
+  IPAddress(MQTT_BROKER_2)
+};
 
 // Timing helpers
 static elapsedMillis tempPollMs; // temperature polling scheduler
@@ -28,6 +36,7 @@ static elapsedMillis panelMs;    // LED frame update scheduler
 static elapsedMillis loopHzMs;    // main-loop frequency measurement window
 static elapsedMillis relayToggleMs; // relay toggle scheduler
 static elapsedMillis printStatusMs; // status print scheduler
+static elapsedMillis networkPollMs; // network/MQTT polling scheduler
 
 static constexpr bool TOGGLE_RELAYS = true;
 static constexpr uint32_t DEBUG_RELAY_MASK =
@@ -39,8 +48,11 @@ static constexpr uint32_t PANEL_VSYNC_PERIOD_US = 2000; // 500 Hz
 static constexpr uint32_t PANEL_FRAME_PERIOD_MS = 50;  // 50 Hz mapped panel refresh
 static constexpr uint32_t RELAY_TOGGLE_PERIOD_MS = 250;
 static constexpr uint32_t STATUS_PRINT_PERIOD_MS = 100;
-static constexpr bool PRINT_ALL_HEATER_STATUS = true;
+static constexpr uint32_t NETWORK_POLL_PERIOD_MS = 100;
+static constexpr bool PRINT_ALL_HEATER_STATUS = false;
 static constexpr bool PANEL_REQUIRE_DRDY_BEFORE_UPDATE = true;
+
+static bool networkInitOkay = false;
 
 static void applyPanelRuntimePreamble_()
 {
@@ -283,6 +295,29 @@ void setup()
   // Prime I/O state
   (void)powerPanel.refreshIo();
   (void)uploadPanelFrame_();
+
+  /**
+   * ---- Network/MQTT/NTP initialization ----
+   */
+  Serial.println();
+  Serial.println(F("Initializing PowerPanel network interface..."));
+  ppi.attach_panel(&powerPanel);
+  (void)ppi.start_panel(PPI_JP5 ? 2 : 1);
+  networkInitOkay = ppi.network_init(&networkLock);
+  if (!networkInitOkay)
+  {
+    Serial.println(F("WARNING: network_init failed (continuing without broker/NTP)"));
+  }
+  else
+  {
+    delay(1000);
+    if (!ntp_start(ntpServerIp, NUM_ELEM(ntpServerIp), &networkLock))
+    {
+      Serial.println(F("WARNING: ntp_start failed"));
+    }
+  }
+  Serial.println();
+
   Serial.println("Setup complete.");
 }
 
@@ -297,6 +332,8 @@ void setup()
 void loop()
 {
   static bool relayMaskOn = false;
+
+  (void)powerPanel.schedulerTick(ntp_get_current_time_millis());
 
   if (relayToggleMs >= RELAY_TOGGLE_PERIOD_MS)
   {
@@ -325,11 +362,19 @@ void loop()
     tempPollMs = 0;
     (void)powerPanel.refreshNextTemp();
   }
+
+  if (networkInitOkay && networkPollMs >= NETWORK_POLL_PERIOD_MS)
+  {
+    networkPollMs = 0;
+    (void)ppi.update_status(false);
+    (void)ppi.check_broker();
+  }
+
   if (panelMs >= PANEL_FRAME_PERIOD_MS)
   {
     panelMs = 0;
     (void)uploadPanelFrame_();
-    printHeaterStatus_();
+    if (PRINT_ALL_HEATER_STATUS) printHeaterStatus_();
   }
 }
 

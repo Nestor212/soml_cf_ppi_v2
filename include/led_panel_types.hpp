@@ -24,6 +24,6 @@ static constexpr uint16_t PANEL_GS_MAX      = 0xFFFF;
  */
 struct ScanFrame
 {
-  uint16_t r[PANEL_LINE_COUNT][PANEL_COL_COUNT] = {};
-  uint16_t g[PANEL_LINE_COUNT][PANEL_COL_COUNT] = {};
+  uint16_t r[PANEL_LINE_COUNT][PANEL_COL_COUNT] = {};  ///< Red channel (15 brightness values)
+  uint16_t g[PANEL_LINE_COUNT][PANEL_COL_COUNT] = {};  ///< Green channel (15 brightness values)
 };

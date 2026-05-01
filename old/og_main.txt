@@ -25,9 +25,9 @@ interface. This interface acts as an MQTT translator to the existing power
 controllers.
 */
 
-#include "ppi_global.hpp"
-#include "ppi.hpp"
-#include "ntp_thread.hpp"
+#include "og_ppi_global.hpp"
+#include "og_ppi.hpp"
+#include "og_ntp_thread.hpp"
 
 #include "TeensyThreads.h"
 

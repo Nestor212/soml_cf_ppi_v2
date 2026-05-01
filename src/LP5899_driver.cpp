@@ -1,10 +1,31 @@
 #include "LP5899_driver.hpp"
 
+/**
+ * @file LP5899_driver.cpp
+ * @brief LP5890 LED driver interface for 8-line × 15-channel panel.
+ * 
+ * Derived from TI LP5899 reference driver (CCSI protocol stack).
+ * Conversion: extracted core register/SRAM/VSYNC operations, removed GPIO
+ * complexity, added frame buffering, and wrapped SPI transactions for
+ * reliable CRC-validated read/write with configurable SPI mode fallback.
+ * 
+ * Key adaptations:
+ * - Simplified GPIO mapping to PCA9698 (offboard in powerPanel.cpp)
+ * - Frame buffer (_frame) decouples state -> hardware updates
+ * - CRC validation on all transfers with MODE0 fallback retry
+ * - Status polling (DRDYST) for frame synchronization
+ */
+
 namespace
 {
+  // File-local constants and decode helpers.
+  // Kept in anonymous namespace to avoid symbol export outside this translation unit.
+
+  // Debug and transport behavior.
   constexpr bool kVerboseLp5899ReadDebug = true;
   constexpr uint8_t kForcedSpiMode = SPI_MODE0;
 
+  // LP5890 forwarded CCSI command words (written through LP5899 bridge).
   constexpr uint16_t W_FC0 = 0xAA00;
   constexpr uint16_t W_FC1 = 0xAA01;
   constexpr uint16_t W_FC2 = 0xAA02;
@@ -14,12 +35,15 @@ namespace
   constexpr uint16_t W_VSYNC = 0xAAF0;
   constexpr uint16_t W_SRAM = 0xAA30;
 
+  // LP5899 CCSI transaction opcodes.
+  // These form the header word in lp5899Transfer_(), with length/address packed in.
   constexpr uint16_t FWD_WR_CRC = 0x2000;
   constexpr uint16_t DATA_RD_CRC = 0x8000;
   constexpr uint16_t REG_WR_CRC = 0xA000;
   constexpr uint16_t REG_RD_CRC = 0xC000;
   constexpr uint16_t SOFTRESET_CRC = 0xE1E1;
 
+  // LP5899 register addresses used by this driver.
   constexpr uint8_t REG_DEVID = 0x00;
   constexpr uint8_t REG_SPICTRL = 0x01;
   constexpr uint8_t REG_TXFFLVL = 0x03;
@@ -30,6 +54,8 @@ namespace
   constexpr uint8_t REG_TXFFST = 0x09;
   constexpr uint8_t REG_RXFFST = 0x0A;
 
+  // REG_STATUS bit masks.
+  // Used for readiness checks, fault detection, and init-state transitions.
   constexpr uint16_t STATUS_FLAG_CCSI = 0x4000;
   constexpr uint16_t STATUS_FLAG_TXFF = 0x1000;
   constexpr uint16_t STATUS_FLAG_RXFF = 0x0800;
@@ -44,6 +70,7 @@ namespace
   constexpr uint16_t STATUS_FLAG_POR = 0x0002;
   constexpr uint16_t STATUS_FLAG_ERR = 0x0001;
 
+  // REG_IFST interface error/status flags.
   constexpr uint16_t IFST_FLAG_SPI_CS = 0x0200;
   constexpr uint16_t IFST_FLAG_SPI_TIMEOUT = 0x0100;
   constexpr uint16_t IFST_FLAG_CCSI_CMD_QUEUE_OVF = 0x0010;
@@ -51,27 +78,32 @@ namespace
   constexpr uint16_t IFST_FLAG_CCSI_CRC = 0x0002;
   constexpr uint16_t IFST_FLAG_CCSI_SIN = 0x0001;
 
+  // REG_TXFFST transmit FIFO flags and fill level mask.
   constexpr uint16_t TXFFST_FLAG_TXFFOVF = 0x8000;
   constexpr uint16_t TXFFST_FLAG_TXFFUVF = 0x4000;
   constexpr uint16_t TXFFST_FLAG_TXFFSED = 0x2000;
   constexpr uint16_t TXFFST_LEVEL_MASK = 0x01FF;
 
+  // REG_RXFFST receive FIFO flags and fill level mask.
   constexpr uint16_t RXFFST_FLAG_RXFFOVF = 0x8000;
   constexpr uint16_t RXFFST_FLAG_RXFFUVF = 0x4000;
   constexpr uint16_t RXFFST_FLAG_RXFFSED = 0x2000;
   constexpr uint16_t RXFFST_LEVEL_MASK = 0x00FF;
 
+  // Common control values used in init/update paths.
   constexpr uint16_t STATUS_CLR_FLAG = 0x8000;
   constexpr uint16_t STATUS_DRDYST = 0x0400;
   constexpr uint16_t LP5899_DEVID_EXPECTED = 0xED99;
   constexpr uint16_t CCSI_CMD_GAP_US = 2;
 
+  // LP5890 FCx initialization payloads (sent via W_FC0..W_FC4).
   constexpr uint16_t kLp5890Fc0[] = {0x4000, 0x78EF, 0x0100};
   constexpr uint16_t kLp5890Fc1[] = {0x0065, 0xE252, 0x95FF};
   constexpr uint16_t kLp5890Fc2[] = {0x000C, 0xD033, 0x0000};
   constexpr uint16_t kLp5890Fc3[] = {0x007A, 0x4055, 0x8F80};
   constexpr uint16_t kLp5890Fc4[] = {0x0007, 0x003F, 0x0008};
 
+  // LP5899 register initialization image starting at REG_SPICTRL.
   constexpr uint16_t kLp5899Regs[] = {
     0x3001,
     0x0004,
@@ -81,6 +113,7 @@ namespace
     0x0000,
   };
 
+  // CRC16-CCITT-FALSE lookup table used by CCSI command and response validation.
   constexpr uint16_t crcCcittTable[256] = {
     0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
     0x8108, 0x9129, 0xa14a, 0xb16b, 0xc18c, 0xd1ad, 0xe1ce, 0xf1ef,
@@ -182,10 +215,12 @@ namespace
 LP5899_PanelDriver::LP5899_PanelDriver(uint8_t csPin,
                                        uint8_t drdyPin,
                                        uint8_t faultPin,
-                                       SPIClass& spi)
-  : _spi(spi), _cs(csPin), _drdy(drdyPin), _fault(faultPin)
-{
-}
+                                       SPIClass& spi):
+  _spi{spi},
+  _cs{csPin},
+  _drdy{drdyPin},
+  _fault{faultPin}
+{}
 
 void LP5899_PanelDriver::begin(uint32_t spiHz)
 {
@@ -206,10 +241,11 @@ void LP5899_PanelDriver::begin(uint32_t spiHz)
 bool LP5899_PanelDriver::init()
 {
   delay(2);
+  // Soft reset device and validate by reading device ID.
   if (!lp5899SoftReset_())
     return false;
 
-  // Lock transfer mode based on a CRC-validated read before programming control registers.
+  // Validate device ID (locks SPI mode for subsequent transfers).
   uint16_t devid = 0;
   if (!getDeviceId_(devid))
     return false;
@@ -497,6 +533,7 @@ bool LP5899_PanelDriver::lp5899Transfer_(uint16_t command,
                                          uint16_t responseCapacity,
                                          uint16_t* receivedCrc)
 {
+  // CCSI protocol: assemble command header + optional data, compute CRC, handle response
   uint16_t tx[64] = {0};
   uint16_t rx[64] = {0};
   uint16_t rxMode0[64] = {0};
@@ -861,17 +898,8 @@ bool LP5899_PanelDriver::debugRawSingle(uint8_t line,
   return lp5890Vsync_();
 }
 
-/*
- * ============================================================
- * 🔥 REAL LP5890 SRAM WRITE
- * ============================================================
- *
- * Channel order per line:
- *   R0,G0,B0, R1,G1,B1 ... R15,G15,B15 (48 channels)
- *
- * We only use:
- *   R[0..14], G[0..14], B = 0
- */
+/// Populate LP5890 SRAM from frame buffer.
+/// Channel order: B,G,R for each of 16 columns (we only use R,G; B always 0).
 bool LP5899_PanelDriver::writeSRAM_()
 {
   for (uint8_t line = 0; line < kLp5890ScanLines; ++line)

@@ -1,17 +1,12 @@
 #include "led_mapper.hpp"
 
-/*
- * Clear the entire scan frame.
- */
+/// Clear all LED intensities in frame.
 void LedPanelMapper::clear(ScanFrame& frame)
 {
   frame = {};
 }
 
-/*
- * Heater 0..14 map to column 0..14 on the "left" bank.
- * Heater 15..29 map to column 0..14 on the "right" bank.
- */
+/// Map heater index to LED column (0-14 for both left/right banks).
 uint8_t LedPanelMapper::colFor_(uint8_t heaterIndex)
 {
   return (heaterIndex < PANEL_COL_COUNT)
@@ -19,18 +14,13 @@ uint8_t LedPanelMapper::colFor_(uint8_t heaterIndex)
            : static_cast<uint8_t>(heaterIndex - PANEL_COL_COUNT);
 }
 
-/*
- * Bank 0 = heaters 0..14
- * Bank 1 = heaters 15..29
- */
+/// Map heater index to LED bank (0 for heaters 0-14, 1 for 15-29).
 uint8_t LedPanelMapper::bankFor_(uint8_t heaterIndex)
 {
   return (heaterIndex < PANEL_COL_COUNT) ? 0 : 1;
 }
 
-/*
- * Scan-line lookup based on the actual frontplane wiring.
- */
+/// Scan line for fault status (line 0 or 1 by bank).
 uint8_t LedPanelMapper::faultLineFor_(uint8_t heaterIndex)
 {
   return (bankFor_(heaterIndex) == 0) ? 0 : 1;
@@ -56,25 +46,22 @@ uint8_t LedPanelMapper::remoteILineFor_(uint8_t heaterIndex)
   return (bankFor_(heaterIndex) == 0) ? 6 : 7;
 }
 
-/*
- * Conservative bring-up fault logic.
- *
- * This keeps the same meaning you had before:
- * - invalid IO => fault
- * - if relay is commanded ON, the expected feedbacks should also be present
- */
+/// Fault condition: invalid I/O or relay/feedback mismatch.
 bool LedPanelMapper::computeFault_(const HeaterState& st) const
 {
+  // Invalid I/O => fault
   if (st.ioValid != SignalValidity::VALID)
     return true;
 
+  // Relay ON: expect all feedbacks
   if (st.relayCommand)
   {
     if (!st.localVoltage)  return true;
     if (!st.localCurrent)  return true;
     if (!st.remoteCurrent) return true;
   }
-  if(!st.relayCommand)
+  // Relay OFF: expect no feedbacks
+  if (!st.relayCommand)
   {
     if (st.localVoltage)  return true;
     if (st.localCurrent)  return true;
@@ -83,13 +70,7 @@ bool LedPanelMapper::computeFault_(const HeaterState& st) const
   return false;
 }
 
-/*
- * Convert one HeaterState into the real scan-frame representation.
- *
- * Important:
- * - fault uses RED only on line 0/1
- * - all other indicators use GREEN on their assigned lines
- */
+/// Render single heater into frame (fault=RED, others=GREEN).
 void LedPanelMapper::renderOne(uint8_t heaterIndex,
                                const HeaterState& st,
                                ScanFrame& frame)
@@ -115,9 +96,7 @@ void LedPanelMapper::renderOne(uint8_t heaterIndex,
       st.remoteCurrent ? GREEN_ON : OFF;
 }
 
-/*
- * Convert all heater states into the scan frame.
- */
+/// Render all heaters into frame (clear then populate).
 void LedPanelMapper::renderAll(const HeaterState* states,
                                uint8_t count,
                                ScanFrame& frame)

@@ -26,8 +26,7 @@ Definition of the control interface to a single power panel
 #ifndef __PP_H__
 #define __PP_H__
 
-
-#include "ppi_global.hpp"
+#include "og_ppi_global.hpp"
 
 #include <stdint.h>
 #include "TeensyThreads.h"
